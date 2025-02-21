@@ -227,6 +227,66 @@ check_status() {
             check_status
         }
     fi
+# Yêu cầu người dùng nhập tên mong muốn cho mã VMess
+read -p "Nhập tên mong muốn cho mã VMess: " user_name
+[[ -z "$user_name" ]] && user_name="v233 boy" # Nếu không nhập, giữ tên mặc định
+
+# Định nghĩa đường dẫn cấu hình
+config_file="/etc/v2ray/config.json"
+
+# Tạo mã VMess với tên người dùng
+generate_vmess() {
+    uuid=$(cat /proc/sys/kernel/random/uuid)
+    port=10086
+
+    cat > "$config_file" <<EOF
+{
+    "inbounds": [{
+        "port": $port,
+        "protocol": "vmess",
+        "settings": {
+            "clients": [{
+                "id": "$uuid",
+                "alterId": 64,
+                "email": "$user_name"
+            }]
+        }
+    }],
+    "outbounds": [{
+        "protocol": "freedom",
+        "settings": {}
+    }]
+}
+EOF
+
+    vmess_link="vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"$user_name\",\"add\":\"$(curl -s ifconfig.me)\",\"port\":\"$port\",\"id\":\"$uuid\",\"aid\":\"64\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"tls\":\"\"}" | base64 -w 0)"
+    echo "VMess link: $vmess_link"
+}
+
+# Cài đặt các gói cần thiết cho QR code
+install_dependencies() {
+    if ! command -v qrencode &>/dev/null; then
+        echo "Đang cài đặt qrencode..."
+        $cmd update && $cmd install -y qrencode
+    fi
+    if ! command -v convert &>/dev/null; then
+        echo "Đang cài đặt ImageMagick..."
+        $cmd install -y imagemagick
+    fi
+}
+
+# Tạo mã QR cho VMess
+generate_qr() {
+    qr_file="/etc/v2ray/vmess_qr.png"
+    echo -n "$vmess_link" | qrencode -o "$qr_file" -s 10
+    convert "$qr_file" -gravity South -splice 0x50 -pointsize 20 -fill black -annotate +0+10 "$user_name" "$qr_file"
+    echo "QR Code đã được tạo: $qr_file"
+}
+
+# Chạy các bước cài đặt
+install_dependencies
+generate_vmess
+generate_qr
 
     # found fail status, remove tmp dir and exit.
     [[ $is_fail ]] && {
