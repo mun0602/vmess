@@ -20,7 +20,7 @@ INSTALL_DIR="/usr/local/xray"
 CONFIG_FILE="${INSTALL_DIR}/config.json"
 SERVICE_FILE="/etc/systemd/system/xray.service"
 CERT_DIR="/usr/local/xray/cert"
-CAMOUFLAGE_DOMAIN="bing.cn"  # Sử dụng bing.cn để ngụy trang
+CAMOUFLAGE_DOMAIN="www.microsoft.com"  # Sử dụng domain uy tín là microsoft.com
 
 # Cài đặt các gói cần thiết
 apt install -y unzip curl jq qrencode uuid-runtime imagemagick openssl
@@ -62,11 +62,23 @@ WS_PATH=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1)  # Rand
 read -p "Nhập tên người dùng: " USERNAME
 USERNAME=${USERNAME:-"user"}
 
-# Tạo file cấu hình cho Xray (Vmess + WebSocket + TLS mà không cần domain thật)
+# Tạo file cấu hình cho Xray (Vmess + WebSocket + TLS với DNS và routing tối ưu)
 cat > ${CONFIG_FILE} <<EOF
 {
   "log": {
-    "loglevel": "warning"
+    "loglevel": "warning",
+    "access": "${INSTALL_DIR}/access.log",
+    "error": "${INSTALL_DIR}/error.log"
+  },
+  "dns": {
+    "servers": [
+      "localhost",
+      "1.1.1.1",
+      "8.8.8.8"
+    ],
+    "queryStrategy": "UseIPv4",
+    "disableCache": false,
+    "disableFallback": false
   },
   "inbounds": [
     {
@@ -91,20 +103,65 @@ cat > ${CONFIG_FILE} <<EOF
               "keyFile": "${CERT_DIR}/private.key"
             }
           ],
-          "serverName": "${CAMOUFLAGE_DOMAIN}"
+          "serverName": "${CAMOUFLAGE_DOMAIN}",
+          "alpn": ["http/1.1", "h2"]
         },
         "wsSettings": {
-          "path": "/${WS_PATH}"
+          "path": "/${WS_PATH}",
+          "headers": {
+            "Host": "${CAMOUFLAGE_DOMAIN}"
+          }
+        },
+        "sockopt": {
+          "mark": 255,
+          "tcpFastOpen": true,
+          "tproxy": "off"
         }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls"]
       }
     }
   ],
   "outbounds": [
     {
       "protocol": "freedom",
-      "settings": {}
+      "settings": {
+        "domainStrategy": "UseIPv4"
+      },
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "settings": {},
+      "tag": "blocked"
+    },
+    {
+      "protocol": "dns",
+      "tag": "dns-out"
     }
-  ]
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["dns-in"],
+        "outboundTag": "dns-out"
+      },
+      {
+        "type": "field",
+        "ip": ["geoip:private"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "protocol": ["bittorrent"],
+        "outboundTag": "blocked"
+      }
+    ]
+  }
 }
 EOF
 
@@ -141,12 +198,31 @@ else
     systemctl status xray
 fi
 
+# Cài đặt các gói cần thiết bổ sung
+apt install -y dnsutils net-tools htop iftop
+
 # Mở cổng firewall
 echo -e "${BLUE}Cấu hình firewall...${PLAIN}"
 apt install -y ufw
 ufw allow ${PORT}/tcp
 ufw allow ${PORT}/udp
+ufw allow 22/tcp  # Đảm bảo SSH luôn được mở
 ufw --force enable
+
+# Tối ưu kernel cho hiệu suất mạng tốt hơn
+cat > /etc/sysctl.d/99-network-performance.conf <<EOF
+net.core.rmem_max = 26214400
+net.core.wmem_max = 26214400
+net.core.rmem_default = 26214400
+net.core.wmem_default = 26214400
+net.ipv4.tcp_rmem = 4096 87380 26214400
+net.ipv4.tcp_wmem = 4096 16384 26214400
+net.ipv4.tcp_congestion_control = bbr
+net.core.default_qdisc = fq
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+EOF
+sysctl --system
 
 # Tạo cấu hình Vmess dạng JSON
 VMESS_JSON="{
@@ -162,7 +238,8 @@ VMESS_JSON="{
   \"host\": \"${CAMOUFLAGE_DOMAIN}\",
   \"path\": \"/${WS_PATH}\",
   \"tls\": \"tls\",
-  \"sni\": \"${CAMOUFLAGE_DOMAIN}\"
+  \"sni\": \"${CAMOUFLAGE_DOMAIN}\",
+  \"alpn\": \"h2,http/1.1\"
 }"
 
 # Tạo URL Vmess theo định dạng chuẩn
@@ -231,12 +308,16 @@ echo -e "• Nếu không kết nối được, kiểm tra:"
 echo -e "  - Port ${PORT} đã được mở: ${GREEN}ufw status${PLAIN}"
 echo -e "  - Xray đang chạy: ${GREEN}systemctl status xray${PLAIN}"
 echo -e "  - Logs: ${GREEN}journalctl -u xray -f${PLAIN}"
-echo -e "  - Kết nối Internet: ${GREEN}ping bing.cn${PLAIN}"
+echo -e "  - DNS có hoạt động: ${GREEN}dig +short google.com @localhost${PLAIN}"
+echo -e "  - Kết nối Internet: ${GREEN}ping google.com${PLAIN}"
+echo -e "  - Kiểm tra chất lượng mạng: ${GREEN}mtr google.com${PLAIN}"
+echo -e "  - Kiểm tra tải tài nguyên: ${GREEN}htop${PLAIN}"
 echo -e ""
 echo -e "${BLUE}Thiết lập cho các máy khách:${PLAIN}"
-echo -e "• Phải đặt Host/SNI là '${CAMOUFLAGE_DOMAIN}'"
+echo -e "• Đặt Host/SNI là '${CAMOUFLAGE_DOMAIN}'"
 echo -e "• Đảm bảo TLS được bật"
 echo -e "• Đảm bảo đường dẫn WebSocket là '/${WS_PATH}'"
+echo -e "• Nếu vẫn không kết nối được, thử đổi DNS trong client sang 1.1.1.1 hoặc 8.8.8.8"
 echo -e ""
 echo -e "${GREEN}Cài đặt thành công bởi: ${CURRENT_USER} vào ${CURRENT_DATE}${PLAIN}"
 echo -e "${GREEN}=======================================${PLAIN}"
