@@ -158,10 +158,30 @@ sysctl --system
 SERVER_IP=$(curl -s ifconfig.me)
 
 # Tạo cấu hình VMess Reality dạng JSON cho client
-VMESS_JSON="{\n  \"v\": \"2\",\n  \"ps\": \"${USERNAME}-VMess-Reality\",\n  \"add\": \"${SERVER_IP}\",\n  \"port\": \"${PORT}\",\n  \"id\": \"${UUID}\",\n  \"aid\": \"0\",\n  \"scy\": \"auto\",\n  \"net\": \"tcp\",\n  \"type\": \"none\",\n  \"host\": \"${SERVER_NAME}\",\n  \"tls\": \"reality\",\n  \"sni\": \"${SERVER_NAME}\",\n  \"alpn\": \"\",\n  \"fp\": \"chrome\",\n  \"pbk\": \"${PUBLIC_KEY}\",\n  \"sid\": \"${SHORT_ID}\"\n}"
+VMESS_JSON=$(cat <<EOF
+{
+  "v": "2",
+  "ps": "${USERNAME}-VMess-Reality",
+  "add": "${SERVER_IP}",
+  "port": "${PORT}",
+  "id": "${UUID}",
+  "aid": "0",
+  "scy": "auto",
+  "net": "tcp",
+  "type": "none",
+  "host": "${SERVER_NAME}",
+  "path": "",
+  "tls": "reality",
+  "sni": "${SERVER_NAME}",
+  "alpn": "",
+  "fp": "chrome",
+  "pbk": "${PUBLIC_KEY}",
+  "sid": "${SHORT_ID}"
+}
+EOF
+)
 
-# Tạo URL VMess Reality
-VMESS_URL="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
+VMESS_URL="vmess://$(echo -n "$VMESS_JSON" | base64 | tr -d '\n')"
 
 # Tạo mã QR với tên ở dưới
 QR_FILE="/root/vmess_reality_qr_${USERNAME}.png"
