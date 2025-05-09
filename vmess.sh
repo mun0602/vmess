@@ -1,497 +1,242 @@
 #!/bin/bash
 
-author=233boy
-# github=https://github.com/233boy/v2ray
+# Colors for better readability
+RED="\033[31m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+BLUE="\033[36m"
+PLAIN="\033[0m"
 
-# bash fonts colors
-red='\e[31m'
-yellow='\e[33m'
-gray='\e[90m'
-green='\e[92m'
-blue='\e[94m'
-magenta='\e[95m'
-cyan='\e[96m'
-none='\e[0m'
-_red() { echo -e ${red}$@${none}; }
-_blue() { echo -e ${blue}$@${none}; }
-_cyan() { echo -e ${cyan}$@${none}; }
-_green() { echo -e ${green}$@${none}; }
-_yellow() { echo -e ${yellow}$@${none}; }
-_magenta() { echo -e ${magenta}$@${none}; }
-_red_bg() { echo -e "\e[41m$@${none}"; }
+# Current date for documentation
+CURRENT_DATE="2025-05-09"
+CURRENT_USER="mun0602"
 
-is_err=$(_red_bg 错误!)
-is_warn=$(_red_bg 警告!)
+# Cập nhật danh sách gói phần mềm (KHÔNG upgrade)
+apt update
 
-err() {
-    echo -e "\n$is_err $@\n" && exit 1
-}
+# Định nghĩa biến
+XRAY_URL="https://dtdp.bio/wp-content/apk/Xray-linux-64.zip"
+INSTALL_DIR="/usr/local/xray"
+CONFIG_FILE="${INSTALL_DIR}/config.json"
+SERVICE_FILE="/etc/systemd/system/xray.service"
+CERT_DIR="/usr/local/xray/cert"
+CAMOUFLAGE_DOMAIN="bing.cn"  # Sử dụng bing.cn để ngụy trang
 
-warn() {
-    echo -e "\n$is_warn $@\n"
-}
+# Cài đặt các gói cần thiết
+apt install -y unzip curl jq qrencode uuid-runtime imagemagick openssl
 
-# root
-[[ $EUID != 0 ]] && err "当前非 ${yellow}ROOT用户.${none}"
+# Kiểm tra xem Xray đã được cài đặt chưa
+if [[ -f "${INSTALL_DIR}/xray" ]]; then
+    echo -e "${YELLOW}Xray đã được cài đặt. Bỏ qua bước cài đặt.${PLAIN}"
+else
+    echo -e "${BLUE}Cài đặt Xray...${PLAIN}"
+    mkdir -p ${INSTALL_DIR}
+    curl -L ${XRAY_URL} -o xray.zip
+    unzip xray.zip -d ${INSTALL_DIR}
+    chmod +x ${INSTALL_DIR}/xray
+    rm xray.zip
+fi
 
-# yum or apt-get, ubuntu/debian/centos
-cmd=$(type -P apt-get || type -P yum)
-[[ ! $cmd ]] && err "此脚本仅支持 ${yellow}(Ubuntu or Debian or CentOS)${none}."
+# Tạo thư mục chứa chứng chỉ
+mkdir -p ${CERT_DIR}
 
-# systemd
-[[ ! $(type -P systemctl) ]] && {
-    err "此系统缺少 ${yellow}(systemctl)${none}, 请尝试执行:${yellow} ${cmd} update -y;${cmd} install systemd -y ${none}来修复此错误."
-}
+# Nhận địa chỉ IP máy chủ
+SERVER_IP=$(curl -s ifconfig.me)
 
-# wget installed or none
-is_wget=$(type -P wget)
+# Tạo chứng chỉ self-signed với bing.cn làm Common Name
+echo -e "${BLUE}Tạo chứng chỉ self-signed với ${CAMOUFLAGE_DOMAIN} làm tên miền...${PLAIN}"
+openssl req -x509 -newkey rsa:4096 -sha256 -days 365 -nodes \
+  -keyout ${CERT_DIR}/private.key -out ${CERT_DIR}/cert.crt \
+  -subj "/CN=${CAMOUFLAGE_DOMAIN}" \
+  -addext "subjectAltName=DNS:${CAMOUFLAGE_DOMAIN}"
 
-# x64
-case $(uname -m) in
-amd64 | x86_64)
-    is_jq_arch=amd64
-    is_core_arch="64"
-    ;;
-*aarch64* | *armv8*)
-    is_jq_arch=arm64
-    is_core_arch="arm64-v8a"
-    ;;
-*)
-    err "此脚本仅支持 64 位系统..."
-    ;;
-esac
+chmod 644 ${CERT_DIR}/cert.crt
+chmod 600 ${CERT_DIR}/private.key
 
-is_core=v2ray
-is_core_name=V2Ray
-is_core_dir=/etc/$is_core
-is_core_bin=$is_core_dir/bin/$is_core
-is_core_repo=v2fly/$is_core-core
-is_conf_dir=$is_core_dir/conf
-is_log_dir=/var/log/$is_core
-is_sh_bin=/usr/local/bin/$is_core
-is_sh_dir=$is_core_dir/sh
-is_sh_repo=$author/$is_core
-is_pkg="wget unzip qrencode imagemagick"  # Thêm qrencode và imagemagick
-is_config_json=$is_core_dir/config.json
-tmp_var_lists=(
-    tmpcore
-    tmpsh
-    tmpjq
-    is_core_ok
-    is_sh_ok
-    is_jq_ok
-    is_pkg_ok
-)
+# Chọn port ngẫu nhiên trong khoảng cao để tránh xung đột
+PORT=$((RANDOM % 20000 + 30000))  # Random port từ 30000 đến 50000
 
-# tmp dir
-tmpdir=$(mktemp -u)
-[[ ! $tmpdir ]] && {
-    tmpdir=/tmp/tmp-$RANDOM
-}
+# Nhập User ID, Path WebSocket, và tên người dùng
+UUID=$(uuidgen)
+WS_PATH=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 8 | head -n 1)  # Random path
+read -p "Nhập tên người dùng: " USERNAME
+USERNAME=${USERNAME:-"user"}
 
-# set up var
-for i in ${tmp_var_lists[*]}; do
-    export $i=$tmpdir/$i
-done
-
-# load bash script.
-load() {
-    . $is_sh_dir/src/$1
-}
-
-# wget add --no-check-certificate
-_wget() {
-    [[ $proxy ]] && export https_proxy=$proxy
-    wget --no-check-certificate $*
-}
-
-# print a message
-msg() {
-    case $1 in
-    warn)
-        local color=$yellow
-        ;;
-    err)
-        local color=$red
-        ;;
-    ok)
-        local color=$green
-        ;;
-    esac
-
-    echo -e "${color}$(date +'%T')${none}) ${2}"
-}
-
-# show help msg
-show_help() {
-    echo -e "Usage: $0 [-f xxx | -l | -p xxx | -v xxx | -h]"
-    echo -e "  -f, --core-file <path>          自定义 $is_core_name 文件路径, e.g., -f /root/${is_core}-linux-64.zip"
-    echo -e "  -l, --local-install             本地获取安装脚本, 使用当前目录"
-    echo -e "  -p, --proxy <addr>              使用代理下载, e.g., -p http://127.0.0.1:2333 or -p socks5://127.0.0.1:2333"
-    echo -e "  -v, --core-version <ver>        自定义 $is_core_name 版本, e.g., -v v5.4.1"
-    echo -e "  -h, --help                      显示此帮助界面\n"
-
-    exit 0
-}
-
-# install dependent pkg
-install_pkg() {
-    cmd_not_found=
-    for i in $*; do
-        [[ ! $(type -P $i) ]] && cmd_not_found="$cmd_not_found,$i"
-    done
-    if [[ $cmd_not_found ]]; then
-        pkg=$(echo $cmd_not_found | sed 's/,/ /g')
-        msg warn "安装依赖包 >${pkg}"
-        $cmd install -y $pkg &>/dev/null
-        if [[ $? != 0 ]]; then
-            [[ $cmd =~ yum ]] && yum install epel-release -y &>/dev/null
-            $cmd update -y &>/dev/null
-            $cmd install -y $pkg &>/dev/null
-            [[ $? == 0 ]] && >$is_pkg_ok
-        else
-            >$is_pkg_ok
-        fi
-    else
-        >$is_pkg_ok
-    fi
-}
-
-# download file
-download() {
-    case $1 in
-    core)
-        link=https://github.com/${is_core_repo}/releases/latest/download/${is_core}-linux-${is_core_arch}.zip
-        [[ $is_core_ver ]] && link="https://github.com/${is_core_repo}/releases/download/${is_core_ver}/${is_core}-linux-${is_core_arch}.zip"
-        name=$is_core_name
-        tmpfile=$tmpcore
-        is_ok=$is_core_ok
-        ;;
-    sh)
-        link=https://github.com/${is_sh_repo}/releases/latest/download/code.zip
-        name="$is_core_name 脚本"
-        tmpfile=$tmpsh
-        is_ok=$is_sh_ok
-        ;;
-    jq)
-        link=https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-$is_jq_arch
-        name="jq"
-        tmpfile=$tmpjq
-        is_ok=$is_jq_ok
-        ;;
-    esac
-
-    msg warn "下载 ${name} > ${link}"
-    if _wget -t 3 -q -c $link -O $tmpfile; then
-        mv -f $tmpfile $is_ok
-    fi
-}
-
-# get server ip
-get_ip() {
-    export "$(_wget -4 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
-    [[ -z $ip ]] && export "$(_wget -6 -qO- https://one.one.one.one/cdn-cgi/trace | grep ip=)" &>/dev/null
-}
-
-# check background tasks status
-check_status() {
-    # dependent pkg install fail
-    [[ ! -f $is_pkg_ok ]] && {
-        msg err "安装依赖包失败"
-        msg err "请尝试手动安装依赖包: $cmd update -y; $cmd install -y $pkg"
-        is_fail=1
-    }
-
-    # download file status
-    if [[ $is_wget ]]; then
-        [[ ! -f $is_core_ok ]] && {
-            msg err "下载 ${is_core_name} 失败"
-            is_fail=1
-        }
-        [[ ! -f $is_sh_ok ]] && {
-            msg err "下载 ${is_core_name} 脚本失败"
-            is_fail=1
-        }
-        [[ ! -f $is_jq_ok ]] && {
-            msg err "下载 jq 失败"
-            is_fail=1
-        }
-    else
-        [[ ! $is_fail ]] && {
-            is_wget=1
-            [[ ! $is_core_file ]] && download core &
-            [[ ! $local_install ]] && download sh &
-            [[ $jq_not_found ]] && download jq &
-            get_ip
-            wait
-            check_status
-        }
-    fi
-
-    # found fail status, remove tmp dir and exit.
-    [[ $is_fail ]] && {
-        exit_and_del_tmpdir
-    }
-}
-
-# parameters check
-pass_args() {
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-        online)
-            err "如果想要安装旧版本, 请转到: https://github.com/233boy/v2ray/tree/old"
-            ;;
-        -f | --core-file)
-            [[ -z $2 ]] && {
-                err "($1) 缺少必需参数, 正确使用示例: [$1 /root/$is_core-linux-64.zip]"
-            } || [[ ! -f $2 ]] && {
-                err "($2) 不是一个常规的文件."
-            }
-            is_core_file=$2
-            shift 2
-            ;;
-        -l | --local-install)
-            [[ ! -f ${PWD}/src/core.sh || ! -f ${PWD}/$is_core.sh ]] && {
-                err "当前目录 (${PWD}) 非完整的脚本目录."
-            }
-            local_install=1
-            shift 1
-            ;;
-        -p | --proxy)
-            [[ -z $2 ]] && {
-                err "($1) 缺少必需参数, 正确使用示例: [$1 http://127.0.0.1:2333 or -p socks5://127.0.0.1:2333]"
-            }
-            proxy=$2
-            shift 2
-            ;;
-        -v | --core-version)
-            [[ -z $2 ]] && {
-                err "($1) 缺少必需参数, 正确使用示例: [$1 v1.8.1]"
-            }
-            is_core_ver=v${2#v}
-            shift 2
-            ;;
-        -h | --help)
-            show_help
-            ;;
-        *)
-            echo -e "\n${is_err} ($@) 为未知参数...\n"
-            show_help
-            ;;
-        esac
-    done
-    [[ $is_core_ver && $is_core_file ]] && {
-        err "无法同时自定义 ${is_core_name} 版本和 ${is_core_name} 文件."
-    }
-}
-
-# exit and remove tmpdir
-exit_and_del_tmpdir() {
-    rm -rf $tmpdir
-    [[ ! $1 ]] && {
-        msg err "哦豁.."
-        msg err "安装过程出现错误..."
-        echo -e "反馈问题) https://github.com/${is_sh_repo}/issues"
-        echo
-        exit 1
-    }
-    exit
-}
-
-# Hàm tạo mã VMess
-generate_vmess() {
-    uuid=$(cat /proc/sys/kernel/random/uuid)
-    port=10086
-    ip_address=$ip  # Sử dụng IP đã lấy từ get_ip()
-
-    # Tạo file cấu hình JSON (ghi đè cấu hình mặc định nếu cần)
-    cat > "$is_config_json" <<EOF
+# Tạo file cấu hình cho Xray (Vmess + WebSocket + TLS mà không cần domain thật)
+cat > ${CONFIG_FILE} <<EOF
 {
-    "inbounds": [{
-        "port": $port,
-        "protocol": "vmess",
-        "settings": {
-            "clients": [{
-                "id": "$uuid",
-                "alterId": 64,
-                "email": "$user_name"
-            }]
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "port": ${PORT},
+      "protocol": "vmess",
+      "settings": {
+        "clients": [
+          {
+            "id": "${UUID}",
+            "alterId": 0,
+            "security": "auto"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "certificates": [
+            {
+              "certificateFile": "${CERT_DIR}/cert.crt",
+              "keyFile": "${CERT_DIR}/private.key"
+            }
+          ],
+          "serverName": "${CAMOUFLAGE_DOMAIN}"
+        },
+        "wsSettings": {
+          "path": "/${WS_PATH}"
         }
-    }],
-    "outbounds": [{
-        "protocol": "freedom",
-        "settings": {}
-    }]
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {}
+    }
+  ]
 }
 EOF
 
-    # Tạo link VMess
-    vmess_link="vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"$user_name\",\"add\":\"$ip_address\",\"port\":\"$port\",\"id\":\"$uuid\",\"aid\":\"64\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"tls\":\"\"}" | base64 -w 0)"
-    msg ok "Link VMess: $vmess_link"
+# Kiểm tra và tạo service systemd nếu chưa có
+if [[ ! -f "${SERVICE_FILE}" ]]; then
+    echo -e "${BLUE}Tạo service Xray...${PLAIN}"
+    cat > ${SERVICE_FILE} <<EOF
+[Unit]
+Description=Xray VMess Service
+After=network.target nss-lookup.target
+
+[Service]
+ExecStart=${INSTALL_DIR}/xray run -config ${CONFIG_FILE}
+Restart=on-failure
+RestartPreventExitStatus=23
+LimitNOFILE=512000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+
+# Khởi động Xray
+systemctl daemon-reload
+systemctl enable xray
+systemctl restart xray
+
+# Kiểm tra status
+sleep 2
+if systemctl is-active --quiet xray; then
+    echo -e "${GREEN}Xray đã khởi động thành công!${PLAIN}"
+else
+    echo -e "${RED}Xray không khởi động được. Kiểm tra logs: journalctl -u xray -f${PLAIN}"
+    systemctl status xray
+fi
+
+# Mở cổng firewall
+echo -e "${BLUE}Cấu hình firewall...${PLAIN}"
+apt install -y ufw
+ufw allow ${PORT}/tcp
+ufw allow ${PORT}/udp
+ufw --force enable
+
+# Tạo cấu hình Vmess dạng JSON
+VMESS_JSON="{
+  \"v\": \"2\",
+  \"ps\": \"${USERNAME}-VMess-WebSocket-TLS\",
+  \"add\": \"${SERVER_IP}\",
+  \"port\": \"${PORT}\",
+  \"id\": \"${UUID}\",
+  \"aid\": \"0\",
+  \"scy\": \"auto\",
+  \"net\": \"ws\",
+  \"type\": \"none\",
+  \"host\": \"${CAMOUFLAGE_DOMAIN}\",
+  \"path\": \"/${WS_PATH}\",
+  \"tls\": \"tls\",
+  \"sni\": \"${CAMOUFLAGE_DOMAIN}\"
+}"
+
+# Tạo URL Vmess theo định dạng chuẩn
+VMESS_URL="vmess://$(echo -n "$VMESS_JSON" | base64 -w 0)"
+
+# Tạo mã QR với tên ở dưới
+QR_FILE="/root/vmess_qr_${USERNAME}.png"
+qrencode -o ${QR_FILE} -s 5 -m 2 "${VMESS_URL}"
+convert ${QR_FILE} -gravity south -fill black -pointsize 20 -annotate +0+10 "**${USERNAME}**" ${QR_FILE}
+
+# Hiển thị thông tin cấu hình
+echo -e "${GREEN}=======================================${PLAIN}"
+echo -e "${GREEN}    Cài đặt VMess TLS hoàn tất!${PLAIN}"
+echo -e "${GREEN}=======================================${PLAIN}"
+echo -e "${YELLOW}Thông tin VMess:${PLAIN}"
+echo -e "${YELLOW}Tên người dùng: ${GREEN}${USERNAME}${PLAIN}"
+echo -e "${YELLOW}Server IP: ${GREEN}${SERVER_IP}${PLAIN}"
+echo -e "${YELLOW}Port: ${GREEN}${PORT}${PLAIN}"
+echo -e "${YELLOW}ID (UUID): ${GREEN}${UUID}${PLAIN}"
+echo -e "${YELLOW}AlterID: ${GREEN}0${PLAIN}"
+echo -e "${YELLOW}Security: ${GREEN}auto${PLAIN}"
+echo -e "${YELLOW}Network: ${GREEN}ws${PLAIN}"
+echo -e "${YELLOW}Path: ${GREEN}/${WS_PATH}${PLAIN}"
+echo -e "${YELLOW}TLS: ${GREEN}Bật${PLAIN}"
+echo -e "${YELLOW}SNI (ngụy trang): ${GREEN}${CAMOUFLAGE_DOMAIN}${PLAIN}"
+echo -e "${GREEN}=======================================${PLAIN}"
+echo -e "${YELLOW}VMess URL:${PLAIN} ${GREEN}${VMESS_URL}${PLAIN}"
+echo -e "${GREEN}=======================================${PLAIN}"
+echo -e "${YELLOW}Mã QR được lưu tại: ${GREEN}${QR_FILE}${PLAIN}"
+echo -e "${YELLOW}Quét mã QR dưới đây để sử dụng:${PLAIN}"
+qrencode -t ANSIUTF8 "${VMESS_URL}"
+echo -e "${GREEN}=======================================${PLAIN}"
+
+# Lưu thông tin cấu hình cho người dùng
+CONFIG_SAVE_FILE="/root/vmess_config_${USERNAME}.json"
+cat > ${CONFIG_SAVE_FILE} <<EOF
+{
+  "Thông tin cấu hình VMess": {
+    "Tên người dùng": "${USERNAME}",
+    "Giao thức": "VMess",
+    "Server IP": "${SERVER_IP}",
+    "Port": "${PORT}",
+    "UUID": "${UUID}",
+    "AlterID": "0",
+    "Security": "auto",
+    "Network": "ws",
+    "Path": "/${WS_PATH}",
+    "TLS": "Bật",
+    "SNI (ngụy trang)": "${CAMOUFLAGE_DOMAIN}"
+  },
+  "VMess URL": "${VMESS_URL}",
+  "Thời gian tạo": "$(date)"
 }
+EOF
 
-# Hàm tạo mã QR
-generate_qr() {
-    qr_file="$is_core_dir/vmess_qr.png"
-    
-    # Tạo mã QR từ link VMess
-    echo -n "$vmess_link" | qrencode -o "$qr_file" -s 10
-    
-    # Thêm tên người dùng vào dưới mã QR
-    convert "$qr_file" -gravity South -splice 0x50 -pointsize 20 -fill black -annotate +0+10 "$user_name" "$qr_file"
-    
-    # Hiển thị mã QR trên terminal
-    msg ok "Mã QR của bạn:"
-    qrencode -t ANSIUTF8 <<< "$vmess_link"
-    
-    msg ok "Mã QR đã được lưu tại: $qr_file"
-}
-
-# main
-main() {
-
-    # check old version
-    [[ -f $is_sh_bin && -d $is_core_dir/bin && -d $is_sh_dir && -d $is_conf_dir ]] && {
-        err "检测到脚本已安装, 如需重装请使用${green} ${is_core} reinstall ${none}命令."
-    }
-
-    # check parameters
-    [[ $# -gt 0 ]] && pass_args $@
-
-    # show welcome msg
-    clear
-    echo
-    echo "........... $is_core_name script by $author .........."
-    echo
-
-    # start installing...
-    msg warn "开始安装..."
-    [[ $is_core_ver ]] && msg warn "${is_core_name} 版本: ${yellow}$is_core_ver${none}"
-    [[ $proxy ]] && msg warn "使用代理: ${yellow}$proxy${none}"
-    # create tmpdir
-    mkdir -p $tmpdir
-    # if is_core_file, copy file
-    [[ $is_core_file ]] && {
-        cp -f $is_core_file $is_core_ok
-        msg warn "${yellow}${is_core_name} 文件使用 > $is_core_file${none}"
-    }
-    # local dir install sh script
-    [[ $local_install ]] && {
-        >$is_sh_ok
-        msg warn "${yellow}本地获取安装脚本 > $PWD ${none}"
-    }
-
-    timedatectl set-ntp true &>/dev/null
-    [[ $? != 0 ]] && {
-        msg warn "${yellow}\e[4m提醒!!! 无法设置自动同步时间, 可能会影响使用 VMess 协议.${none}"
-    }
-
-    # install dependent pkg
-    install_pkg $is_pkg &
-
-    # jq
-    if [[ $(type -P jq) ]]; then
-        >$is_jq_ok
-    else
-        jq_not_found=1
-    fi
-    # if wget installed. download core, sh, jq, get ip
-    [[ $is_wget ]] && {
-        [[ ! $is_core_file ]] && download core &
-        [[ ! $local_install ]] && download sh &
-        [[ $jq_not_found ]] && download jq &
-        get_ip
-    }
-
-    # waiting for background tasks is done
-    wait
-
-    # check background tasks status
-    check_status
-
-    # test $is_core_file
-    if [[ $is_core_file ]]; then
-        unzip -qo $is_core_ok -d $tmpdir/testzip &>/dev/null
-        [[ $? != 0 ]] && {
-            msg err "${is_core_name} 文件无法通过测试."
-            exit_and_del_tmpdir
-        }
-        for i in ${is_core} geoip.dat geosite.dat; do
-            [[ ! -f $tmpdir/testzip/$i ]] && is_file_err=1 && break
-        done
-        [[ $is_file_err ]] && {
-            msg err "${is_core_name} 文件无法通过测试."
-            exit_and_del_tmpdir
-        }
-    fi
-
-    # get server ip.
-    [[ ! $ip ]] && {
-        msg err "获取服务器 IP 失败."
-        exit_and_del_tmpdir
-    }
-
-    # create sh dir...
-    mkdir -p $is_sh_dir
-
-    # copy sh file or unzip sh zip file.
-    if [[ $local_install ]]; then
-        cp -rf $PWD/* $is_sh_dir
-    else
-        unzip -qo $is_sh_ok -d $is_sh_dir
-    fi
-
-    # create core bin dir
-    mkdir -p $is_core_dir/bin
-    # copy core file or unzip core zip file
-    if [[ $is_core_file ]]; then
-        cp -rf $tmpdir/testzip/* $is_core_dir/bin
-    else
-        unzip -qo $is_core_ok -d $is_core_dir/bin
-    fi
-
-    # add alias
-    echo "alias $is_core=$is_sh_bin" >>/root/.bashrc
-
-    # core command
-    ln -sf $is_sh_dir/$is_core.sh $is_sh_bin
-
-    # jq
-    [[ $jq_not_found ]] && mv -f $is_jq_ok /usr/bin/jq
-
-    # chmod
-    chmod +x $is_core_bin $is_sh_bin /usr/bin/jq
-
-    # create log dir
-    mkdir -p $is_log_dir
-
-    # show a tips msg
-    msg ok "生成配置文件..."
-
-    # create systemd service
-    load systemd.sh
-    is_new_install=1
-    install_service $is_core &>/dev/null
-
-    # create conf dir
-    mkdir -p $is_conf_dir
-
-    load core.sh
-    # create a tcp config
-    add tcp
-
-    # Nhập tên người dùng
-    msg warn "请输入您的用户名 (留空将使用默认值 'v233 boy'):"
-    read -p "用户名: " user_name
-    [[ -z "$user_name" ]] && user_name="v233 boy"
-
-    # Tạo mã VMess và mã QR
-    generate_vmess
-    generate_qr
-
-    # remove tmp dir and exit.
-    exit_and_del_tmpdir ok
-}
-
-# start.
-main $@
+echo -e "${BLUE}Thông tin cấu hình đã được lưu vào: ${GREEN}${CONFIG_SAVE_FILE}${PLAIN}"
+echo -e ""
+echo -e "${YELLOW}HƯỚNG DẪN SỬ DỤNG:${PLAIN}"
+echo -e "1. Cài đặt ứng dụng khách v2rayN (Windows), v2rayNG (Android), Shadowrocket (iOS)"
+echo -e "2. Quét mã QR hoặc nhập URL VMess"
+echo -e "3. QUAN TRỌNG: Đảm bảo giá trị SNI được đặt là '${CAMOUFLAGE_DOMAIN}'"
+echo -e "4. Khi kết nối, lưu lượng sẽ được ngụy trang như đang kết nối đến ${CAMOUFLAGE_DOMAIN}"
+echo -e ""
+echo -e "${RED}KHẮC PHỤC SỰ CỐ:${PLAIN}"
+echo -e "• Nếu không kết nối được, kiểm tra:"
+echo -e "  - Port ${PORT} đã được mở: ${GREEN}ufw status${PLAIN}"
+echo -e "  - Xray đang chạy: ${GREEN}systemctl status xray${PLAIN}"
+echo -e "  - Logs: ${GREEN}journalctl -u xray -f${PLAIN}"
+echo -e "  - Kết nối Internet: ${GREEN}ping bing.cn${PLAIN}"
+echo -e ""
+echo -e "${BLUE}Thiết lập cho các máy khách:${PLAIN}"
+echo -e "• Phải đặt Host/SNI là '${CAMOUFLAGE_DOMAIN}'"
+echo -e "• Đảm bảo TLS được bật"
+echo -e "• Đảm bảo đường dẫn WebSocket là '/${WS_PATH}'"
+echo -e ""
+echo -e "${GREEN}Cài đặt thành công bởi: ${CURRENT_USER} vào ${CURRENT_DATE}${PLAIN}"
+echo -e "${GREEN}=======================================${PLAIN}"
