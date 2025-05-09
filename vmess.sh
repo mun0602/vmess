@@ -25,6 +25,10 @@ fi
 UUID=$(uuidgen)
 PORT=10086
 
+# Nhập tên hiển thị (ps) cho cấu hình VMess
+read -p "Nhập tên hiển thị cho cấu hình (ps): " PS_NAME
+PS_NAME=${PS_NAME:-"VMess-TCP-Test"}
+
 # Tạo file cấu hình Xray (VMess TCP đơn giản, có log)
 cat > ${CONFIG_FILE} <<EOF
 {
@@ -111,7 +115,7 @@ echo "============================"
 VMESS_JSON=$(cat <<EOF
 {
   "v": "2",
-  "ps": "VMess-TCP-Test",
+  "ps": "${PS_NAME}",
   "add": "${SERVER_IP}",
   "port": "${PORT}",
   "id": "${UUID}",
