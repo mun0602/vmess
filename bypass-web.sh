@@ -1,96 +1,181 @@
 #!/bin/bash
-# Script auto reverse proxy bằng Caddy trên Ubuntu
-# Fixed GPG key import issue
+# Script auto reverse proxy bằng Nginx trên Ubuntu
+# Author: Fixed version for @mun0602
 
-echo "=== Reverse Proxy Setup (Caddy) ==="
+echo "=== Reverse Proxy Setup (Nginx) ==="
 
 # Kiểm tra quyền root
 if [ "$EUID" -ne 0 ]; then 
-    echo "Vui lòng chạy với sudo hoặc root"
+    echo "❌ Vui lòng chạy với sudo"
     exit 1
 fi
 
-# Hỏi domain của bạn
-read -p "Nhập domain của bạn (ví dụ: mydomain.com): " MY_DOMAIN
-# Hỏi trang web cần bỏ chặn
-read -p "Nhập URL trang web bị chặn (ví dụ: https://target.example): " TARGET_URL
+# Dọn dẹp Caddy repository bị lỗi
+echo "🧹 Dọn dẹp Caddy cũ..."
+rm -f /etc/apt/sources.list.d/caddy-stable.list
+rm -f /etc/apt/trusted.gpg.d/caddy-stable.asc
+rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 
-echo "Đang cập nhật hệ thống..."
-apt update -y 
+# Thu thập thông tin
+read -p "📝 Nhập domain của bạn (ví dụ: proxy.mydomain.com): " MY_DOMAIN
+read -p "📝 Nhập URL đích (ví dụ: https://blocked-site.com): " TARGET_URL
 
-echo "Đang cài đặt dependencies..."
-apt install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg2
+# Validate input
+if [[ -z "$MY_DOMAIN" ]] || [[ -z "$TARGET_URL" ]]; then
+    echo "❌ Domain và URL không được để trống!"
+    exit 1
+fi
 
-echo "Đang thêm GPG key của Caddy..."
-# Cách mới: Import GPG key đúng format
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-
-echo "Đang thêm repository Caddy..."
-# Cách mới: Sử dụng signed-by
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-
-# Sửa file sources.list để thêm signed-by
-sed -i 's|deb |deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] |' /etc/apt/sources.list.d/caddy-stable.list
-
-echo "Đang cập nhật package list..."
+# Cập nhật hệ thống
+echo "📦 Cập nhật hệ thống..."
 apt update -y
 
-echo "Đang cài đặt Caddy..."
-apt install -y caddy
+# Cài đặt Nginx và Certbot
+echo "📦 Cài đặt Nginx và Certbot..."
+apt install -y nginx certbot python3-certbot-nginx
 
-# Kiểm tra cài đặt thành công
-if ! command -v caddy &> /dev/null; then
-    echo "❌ Lỗi: Không thể cài đặt Caddy"
+# Kiểm tra cài đặt
+if ! command -v nginx &> /dev/null; then
+    echo "❌ Lỗi: Không thể cài đặt Nginx"
     exit 1
 fi
 
-echo "✅ Caddy đã được cài đặt: $(caddy version)"
+echo "✅ Nginx đã được cài đặt: $(nginx -v 2>&1)"
 
-# Backup cấu hình cũ nếu có
-if [ -f /etc/caddy/Caddyfile ]; then
-    cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.backup.$(date +%s)
-    echo "📦 Đã backup cấu hình cũ"
-fi
+# Tạo cấu hình Nginx
+NGINX_CONF="/etc/nginx/sites-available/$MY_DOMAIN"
+echo "📝 Tạo cấu hình Nginx..."
 
-# Tạo file cấu hình Caddy
-echo "Đang tạo cấu hình Caddy..."
-cat > /etc/caddy/Caddyfile <<EOF
-$MY_DOMAIN {
-    reverse_proxy $TARGET_URL {
-        header_up Host {upstream_hostport}
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote}
-        header_up X-Forwarded-Proto {scheme}
+cat > "$NGINX_CONF" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $MY_DOMAIN;
+
+    # Redirect HTTP to HTTPS
+    return 301 https://\$server_name\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $MY_DOMAIN;
+
+    # SSL certificates (sẽ được Certbot tự động thêm)
+    # ssl_certificate /etc/letsencrypt/live/$MY_DOMAIN/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/$MY_DOMAIN/privkey.pem;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+
+    # Proxy settings
+    location / {
+        proxy_pass $TARGET_URL;
+        proxy_set_header Host \$http_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        # WebSocket support
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
     }
+
+    # Logs
+    access_log /var/log/nginx/${MY_DOMAIN}_access.log;
+    error_log /var/log/nginx/${MY_DOMAIN}_error.log;
 }
 EOF
 
-# Validate cấu hình
-echo "Đang kiểm tra cấu hình..."
-if ! caddy validate --config /etc/caddy/Caddyfile; then
-    echo "❌ Lỗi: Cấu hình Caddy không hợp lệ"
+# Tạo symlink
+echo "🔗 Kích hoạt site..."
+ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/
+
+# Xóa default site nếu tồn tại
+rm -f /etc/nginx/sites-enabled/default
+
+# Test cấu hình Nginx
+echo "🔍 Kiểm tra cấu hình Nginx..."
+if ! nginx -t; then
+    echo "❌ Lỗi: Cấu hình Nginx không hợp lệ"
+    cat "$NGINX_CONF"
     exit 1
 fi
 
-# Restart Caddy để áp dụng
-echo "Đang khởi động Caddy..."
-systemctl enable caddy
-systemctl restart caddy
+# Reload Nginx
+echo "🔄 Khởi động lại Nginx..."
+systemctl enable nginx
+systemctl restart nginx
 
-# Kiểm tra trạng thái
+# Kiểm tra Nginx chạy
 sleep 2
-if systemctl is-active --quiet caddy; then
-    echo "=========================================="
-    echo "✅ Hoàn tất!"
-    echo "Domain:  https://$MY_DOMAIN"
-    echo "Proxy tới: $TARGET_URL"
-    echo "SSL được cấp tự động bởi Let's Encrypt."
-    echo ""
-    echo "Kiểm tra trạng thái: systemctl status caddy"
-    echo "Xem logs: journalctl -u caddy -f"
-    echo "=========================================="
-else
-    echo "❌ Lỗi: Caddy không chạy được"
-    echo "Xem logs: journalctl -u caddy -xe"
+if ! systemctl is-active --quiet nginx; then
+    echo "❌ Lỗi: Nginx không chạy được"
+    systemctl status nginx
     exit 1
 fi
+
+echo ""
+echo "=========================================="
+echo "✅ Nginx đã được cấu hình!"
+echo "Domain: http://$MY_DOMAIN (HTTP)"
+echo "Proxy tới: $TARGET_URL"
+echo "=========================================="
+echo ""
+
+# Hỏi có muốn cài SSL không
+read -p "🔒 Bạn có muốn cài SSL miễn phí (Let's Encrypt)? (y/n): " INSTALL_SSL
+
+if [[ "$INSTALL_SSL" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "📧 QUAN TRỌNG: Certbot cần email để:"
+    echo "   - Gửi thông báo gia hạn SSL"
+    echo "   - Khôi phục tài khoản nếu mất"
+    read -p "Nhập email của bạn: " CERTBOT_EMAIL
+    
+    if [[ -z "$CERTBOT_EMAIL" ]]; then
+        echo "⚠️  Bỏ qua cài SSL (chưa có email)"
+    else
+        echo "🔒 Đang cài đặt SSL với Let's Encrypt..."
+        echo "⚠️  Lưu ý: Domain $MY_DOMAIN phải trỏ về IP server này!"
+        
+        # Chạy Certbot
+        certbot --nginx -d "$MY_DOMAIN" --non-interactive --agree-tos -m "$CERTBOT_EMAIL" --redirect
+        
+        if [ $? -eq 0 ]; then
+            echo ""
+            echo "=========================================="
+            echo "🎉 HOÀN TẤT!"
+            echo "Domain: https://$MY_DOMAIN (HTTPS với SSL)"
+            echo "Proxy tới: $TARGET_URL"
+            echo "SSL: Tự động gia hạn mỗi 60 ngày"
+            echo "=========================================="
+        else
+            echo ""
+            echo "⚠️  Lỗi cài SSL. Có thể do:"
+            echo "   1. Domain chưa trỏ về IP server này"
+            echo "   2. Port 80/443 bị firewall chặn"
+            echo "   3. Domain không hợp lệ"
+            echo ""
+            echo "Bạn vẫn có thể dùng HTTP: http://$MY_DOMAIN"
+        fi
+    fi
+else
+    echo "⚠️  Bỏ qua cài SSL. Chỉ dùng HTTP."
+fi
+
+echo ""
+echo "📋 Các lệnh hữu ích:"
+echo "   Xem logs: tail -f /var/log/nginx/${MY_DOMAIN}_error.log"
+echo "   Reload Nginx: systemctl reload nginx"
+echo "   Kiểm tra status: systemctl status nginx"
+echo "   Test cấu hình: nginx -t"
+echo ""
