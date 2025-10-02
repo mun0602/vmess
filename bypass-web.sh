@@ -1,6 +1,6 @@
 #!/bin/bash
 # Script auto reverse proxy bằng Caddy trên Ubuntu
-# Tác giả: ChatGPT
+# Tác giả: ...
 
 # Yêu cầu: chạy với user root hoặc sudo
 
